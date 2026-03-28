@@ -1,6 +1,7 @@
-// ── DOGSeer Offscreen Document — mic capture ──────────────────────────────────
+// ── DOGSeer Offscreen Document — mic capture + audio playback ─────────────────
 let mediaRecorder = null;
 let micStream = null;
+const audioContext = new AudioContext({ sampleRate: 24000 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.target !== "offscreen") return;
@@ -22,7 +23,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       mediaRecorder.ondataavailable = async (e) => {
         if (e.data.size === 0) return;
         const buf = await e.data.arrayBuffer();
-        // Send audio chunk back to background as base64
         const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
         chrome.runtime.sendMessage({ type: "AUDIO_CHUNK", data: b64 });
       };
@@ -33,7 +33,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ error: err.message });
     });
 
-    return true; // async response
+    return true;
   }
 
   if (msg.type === "STOP_MIC") {
@@ -42,5 +42,29 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     mediaRecorder = null;
     micStream = null;
     sendResponse({ status: "stopped" });
+  }
+
+  if (msg.type === "PLAY_AUDIO") {
+    // msg.data is base64 PCM16 audio from Gemini at 24kHz
+    const binary = atob(msg.data);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+    // Convert PCM16 to Float32
+    const pcm16 = new Int16Array(bytes.buffer);
+    const float32 = new Float32Array(pcm16.length);
+    for (let i = 0; i < pcm16.length; i++) {
+      float32[i] = pcm16[i] / 32768.0;
+    }
+
+    const audioBuffer = audioContext.createBuffer(1, float32.length, 24000);
+    audioBuffer.copyToChannel(float32, 0);
+
+    const source = audioContext.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(audioContext.destination);
+    source.start();
+
+    sendResponse({ status: "playing" });
   }
 });

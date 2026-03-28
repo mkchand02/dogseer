@@ -20,7 +20,9 @@ function connectWebSocket() {
 
   ws.onmessage = async (event) => {
     if (event.data instanceof ArrayBuffer) {
-      console.log("[DOGSeer] Audio received, length:", event.data.byteLength);
+      // Forward to offscreen for playback
+      const b64 = btoa(String.fromCharCode(...new Uint8Array(event.data)));
+      chrome.runtime.sendMessage({ target: "offscreen", type: "PLAY_AUDIO", data: b64 });
       return;
     }
     try {

@@ -2,10 +2,8 @@
 const AGENT_WS_URL = "wss://dogseer-agent-587117712878.us-central1.run.app/live";
 
 let ws            = null;
-let mediaRecorder = null;
 let frameInterval = null;
 let tabStream     = null;
-let micStream     = null;
 let isListening   = false;
 
 // ── WebSocket management ──────────────────────────────────────────────────────
@@ -22,7 +20,7 @@ function connectWebSocket() {
 
   ws.onmessage = async (event) => {
     if (event.data instanceof ArrayBuffer) {
-      await playAudioBuffer(event.data);
+      console.log("[DOGSeer] Audio received, length:", event.data.byteLength);
       return;
     }
     try {
@@ -33,7 +31,7 @@ function connectWebSocket() {
           broadcastStatus(msg.value);
           break;
         case "action":
-          dispatchAction(msg);  // fire and forget — no await
+          dispatchAction(msg);
           break;
         case "transcript":
           chrome.tts.speak(msg.value, { rate: 0.95, pitch: 1.0, volume: 1.0 });
@@ -61,6 +59,18 @@ function connectWebSocket() {
   };
 }
 
+// ── Offscreen document helper ─────────────────────────────────────────────────
+async function ensureOffscreen() {
+  const existing = await chrome.offscreen.hasDocument();
+  if (!existing) {
+    await chrome.offscreen.createDocument({
+      url: "offscreen.html",
+      reasons: ["USER_MEDIA"],
+      justification: "Mic capture for push-to-talk"
+    });
+  }
+}
+
 // ── Push-to-talk: START ───────────────────────────────────────────────────────
 async function startListening() {
   if (isListening) return;
@@ -73,67 +83,9 @@ async function startListening() {
       await waitForWS();
     }
 
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab) throw new Error("No active tab");
-
-    // Mic audio
-    micStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        sampleRate: 16000,
-        echoCancellation: true,
-        noiseSuppression: true
-      }
-    });
-
-    mediaRecorder = new MediaRecorder(micStream, {
-      mimeType: "audio/webm;codecs=opus"
-    });
-
-    mediaRecorder.ondataavailable = (e) => {
-      if (e.data.size > 0 && ws?.readyState === WebSocket.OPEN) {
-        e.data.arrayBuffer().then(buf => ws.send(buf));
-      }
-    };
-
-    mediaRecorder.start(250);
-
-    // Screen frames at 1fps
-    try {
-      tabStream = await chrome.tabCapture.capture({
-        video: true, audio: false,
-        videoConstraints: {
-          mandatory: {
-            minWidth: 1280, maxWidth: 1280,
-            minHeight: 720, maxHeight: 720,
-            maxFrameRate: 1
-          }
-        }
-      });
-
-      if (tabStream) {
-        const video = document.createElement("video");
-        video.srcObject = tabStream;
-        await video.play();
-
-        const canvas = new OffscreenCanvas(1280, 720);
-        const ctx    = canvas.getContext("2d");
-
-        frameInterval = setInterval(async () => {
-          if (ws?.readyState !== WebSocket.OPEN) return;
-          ctx.drawImage(video, 0, 0, 1280, 720);
-          const blob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.7 });
-          const reader = new FileReader();
-          reader.onload = () => {
-            const b64 = reader.result.split(",")[1];
-            ws.send(JSON.stringify({ type: "frame", data: b64 }));
-          };
-          reader.readAsDataURL(blob);
-        }, 1000);
-      }
-    } catch (captureErr) {
-      console.warn("[DOGSeer] Screen capture unavailable:", captureErr);
-    }
+    // Start mic via offscreen document
+    await ensureOffscreen();
+    chrome.runtime.sendMessage({ target: "offscreen", type: "START_MIC" });
 
   } catch (err) {
     console.error("[DOGSeer] startListening error:", err);
@@ -146,8 +98,8 @@ async function startListening() {
 function stopListening() {
   isListening = false;
 
-  if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
-  micStream?.getTracks().forEach(t => t.stop());
+  chrome.runtime.sendMessage({ target: "offscreen", type: "STOP_MIC" });
+
   clearInterval(frameInterval);
   tabStream?.getTracks().forEach(t => t.stop());
 
@@ -156,11 +108,27 @@ function stopListening() {
   }
 
   broadcastStatus("thinking");
-  mediaRecorder = null;
-  micStream     = null;
   tabStream     = null;
   frameInterval = null;
 }
+
+// ── Forward audio chunks from offscreen → WebSocket ───────────────────────────
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.type === "AUDIO_CHUNK") {
+    if (ws?.readyState === WebSocket.OPEN) {
+      // Decode base64 back to binary and send
+      const binary = atob(msg.data);
+      const buf = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) buf[i] = binary.charCodeAt(i);
+      ws.send(buf.buffer);
+    }
+  }
+
+  if (msg.type === "START_LISTENING") startListening();
+  if (msg.type === "STOP_LISTENING")  stopListening();
+  if (msg.type === "SPACE_DOWN")      startListening();
+  if (msg.type === "SPACE_UP")        stopListening();
+});
 
 // ── Action dispatcher ─────────────────────────────────────────────────────────
 async function dispatchAction(msg) {
@@ -178,12 +146,8 @@ async function dispatchAction(msg) {
     return;
   }
 
-  // Use a Promise with timeout to avoid channel-closed errors
   const actionPromise = new Promise((resolve) => {
-    const timeout = setTimeout(() => {
-      resolve({ error: "Action timed out" });
-    }, 8000);
-
+    const timeout = setTimeout(() => resolve({ error: "Action timed out" }), 8000);
     chrome.tabs.sendMessage(tab.id, {
       type: "EXECUTE_ACTION",
       tool: msg.tool,
@@ -200,17 +164,6 @@ async function dispatchAction(msg) {
 
   const result = await actionPromise;
   ws?.send(JSON.stringify({ type: "action_result", data: result }));
-}
-
-// ── Audio playback ────────────────────────────────────────────────────────────
-async function playAudioBuffer(arrayBuffer) {
-  try {
-    broadcastStatus("speaking");
-    console.log("[DOGSeer] Audio received, length:", arrayBuffer.byteLength);
-    // TODO: pipe to AudioContext for real playback
-  } catch (e) {
-    console.error("[DOGSeer] Audio playback error:", e);
-  }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -234,32 +187,7 @@ function waitForWS(timeout = 5000) {
   });
 }
 
-// ── Message listener ──────────────────────────────────────────────────────────
-chrome.runtime.onMessage.addListener((msg) => {
-  // Intentionally NOT returning true — we don't send async responses here
-  if (msg.type === "START_LISTENING") startListening();
-  if (msg.type === "STOP_LISTENING")  stopListening();
-});
-
-// ── Keyboard shortcuts ────────────────────────────────────────────────────────
-chrome.commands.onCommand.addListener((command) => {
-  console.log("[DOGSeer] Command:", command);
-  if (command === "start-listening") startListening();
-  if (command === "stop-listening")  stopListening();
-});
-
-// ── Init ──────────────────────────────────────────────────────────────────────
-connectWebSocket();
-
-// ── SPACE push-to-talk from content scripts ───────────────────────────────────
-// Content scripts send SPACE_DOWN / SPACE_UP since service workers
-// can't intercept keyboard events directly.
-chrome.runtime.onMessage.addListener((msg) => {
-  if (msg.type === "SPACE_DOWN") startListening();
-  if (msg.type === "SPACE_UP")   stopListening();
-});
-
-// ── Auto-open Gmail on extension install/startup ──────────────────────────────
+// ── Auto-open Gmail on install/startup ────────────────────────────────────────
 chrome.runtime.onInstalled.addListener(() => {
   chrome.tabs.create({ url: "https://mail.google.com" });
 });
@@ -267,3 +195,6 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.runtime.onStartup.addListener(() => {
   chrome.tabs.create({ url: "https://mail.google.com" });
 });
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+connectWebSocket();

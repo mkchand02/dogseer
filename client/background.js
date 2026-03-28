@@ -1,40 +1,42 @@
 // ── DOGSeer background service worker ────────────────────────────────────────
-const AGENT_WS_URL = "wss://dogseer-agent-587117712878.us-central1.run.app/live";
+// const AGENT_WS_URL = "wss://dogseer-agent-587117712878.us-central1.run.app/live";
+const AGENT_WS_URL = "ws://localhost:8000/live"; // For local development
 
 let ws            = null;
 let frameInterval = null;
 let tabStream     = null;
 let isListening   = false;
+let isConnecting  = false;  // prevent multiple simultaneous connects
 
 // ── WebSocket management ──────────────────────────────────────────────────────
 function connectWebSocket() {
-  if (ws && ws.readyState === WebSocket.OPEN) return;
+  // Hard guard — never open 2 connections
+  if (isConnecting) return;
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
 
+  isConnecting = true;
   ws = new WebSocket(AGENT_WS_URL);
   ws.binaryType = "arraybuffer";
 
   ws.onopen = () => {
+    isConnecting = false;
     console.log("[DOGSeer] WS connected");
     broadcastStatus("connected");
   };
 
   ws.onmessage = async (event) => {
     if (event.data instanceof ArrayBuffer) {
-      // Forward to offscreen for playback
+      if (event.data.byteLength < 10) return; // skip empty keepalive frames
       const b64 = btoa(String.fromCharCode(...new Uint8Array(event.data)));
-      chrome.runtime.sendMessage({ target: "offscreen", type: "PLAY_AUDIO", data: b64 });
+      chrome.runtime.sendMessage({ target: "offscreen", type: "PLAY_AUDIO", data: b64 }).catch(() => {});
       return;
     }
     try {
       const msg = JSON.parse(event.data);
       console.log("[DOGSeer] msg from agent:", msg.type);
       switch (msg.type) {
-        case "status":
-          broadcastStatus(msg.value);
-          break;
-        case "action":
-          dispatchAction(msg);
-          break;
+        case "status":      broadcastStatus(msg.value); break;
+        case "action":      dispatchAction(msg); break;
         case "transcript":
           chrome.tts.speak(msg.value, { rate: 0.95, pitch: 1.0, volume: 1.0 });
           broadcastStatus("speaking");
@@ -50,14 +52,17 @@ function connectWebSocket() {
   };
 
   ws.onerror = (e) => {
+    isConnecting = false;
     console.error("[DOGSeer] WS error:", e);
     broadcastStatus("error");
   };
 
   ws.onclose = () => {
-    console.log("[DOGSeer] WS closed — reconnecting in 3s");
+    isConnecting = false;
+    ws = null;
+    console.log("[DOGSeer] WS closed — reconnecting in 5s");
     broadcastStatus("ready");
-    setTimeout(connectWebSocket, 3000);
+    setTimeout(connectWebSocket, 5000); // longer delay to avoid storms
   };
 }
 
@@ -68,7 +73,7 @@ async function ensureOffscreen() {
     await chrome.offscreen.createDocument({
       url: "offscreen.html",
       reasons: ["USER_MEDIA"],
-      justification: "Mic capture for push-to-talk"
+      justification: "Mic capture and audio playback for push-to-talk"
     });
   }
 }
@@ -85,9 +90,49 @@ async function startListening() {
       await waitForWS();
     }
 
-    // Start mic via offscreen document
+    // 1. Start mic via offscreen
     await ensureOffscreen();
     chrome.runtime.sendMessage({ target: "offscreen", type: "START_MIC" });
+
+    // 2. Start screen capture at 1fps and send frames to agent
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab) {
+      try {
+        tabStream = await chrome.tabCapture.capture({
+          video: true, audio: false,
+          videoConstraints: {
+            mandatory: {
+              minWidth: 1280, maxWidth: 1280,
+              minHeight: 720, maxHeight: 720,
+              maxFrameRate: 1
+            }
+          }
+        });
+
+        if (tabStream) {
+          const video = document.createElement("video");
+          video.srcObject = tabStream;
+          await video.play();
+
+          const canvas = new OffscreenCanvas(1280, 720);
+          const ctx = canvas.getContext("2d");
+
+          frameInterval = setInterval(async () => {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            ctx.drawImage(video, 0, 0, 1280, 720);
+            const blob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.6 });
+            const reader = new FileReader();
+            reader.onload = () => {
+              const b64 = reader.result.split(",")[1];
+              ws.send(JSON.stringify({ type: "frame", data: b64 }));
+            };
+            reader.readAsDataURL(blob);
+          }, 1000);
+        }
+      } catch (captureErr) {
+        console.warn("[DOGSeer] Screen capture skipped:", captureErr.message);
+      }
+    }
 
   } catch (err) {
     console.error("[DOGSeer] startListening error:", err);
@@ -100,7 +145,7 @@ async function startListening() {
 function stopListening() {
   isListening = false;
 
-  chrome.runtime.sendMessage({ target: "offscreen", type: "STOP_MIC" });
+  chrome.runtime.sendMessage({ target: "offscreen", type: "STOP_MIC" }).catch(() => {});
 
   clearInterval(frameInterval);
   tabStream?.getTracks().forEach(t => t.stop());
@@ -118,7 +163,6 @@ function stopListening() {
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === "AUDIO_CHUNK") {
     if (ws?.readyState === WebSocket.OPEN) {
-      // Decode base64 back to binary and send
       const binary = atob(msg.data);
       const buf = new Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i++) buf[i] = binary.charCodeAt(i);
@@ -141,10 +185,7 @@ async function dispatchAction(msg) {
   const isWhatsApp = tab.url?.includes("web.whatsapp.com");
 
   if (!isGmail && !isWhatsApp) {
-    ws?.send(JSON.stringify({
-      type: "action_result",
-      data: { error: "Not on Gmail or WhatsApp Web" }
-    }));
+    ws?.send(JSON.stringify({ type: "action_result", data: { error: "Not on Gmail or WhatsApp Web" } }));
     return;
   }
 
@@ -179,11 +220,9 @@ function waitForWS(timeout = 5000) {
     const start = Date.now();
     const check = setInterval(() => {
       if (ws?.readyState === WebSocket.OPEN) {
-        clearInterval(check);
-        resolve();
+        clearInterval(check); resolve();
       } else if (Date.now() - start > timeout) {
-        clearInterval(check);
-        reject(new Error("WS timeout"));
+        clearInterval(check); reject(new Error("WS timeout"));
       }
     }, 100);
   });

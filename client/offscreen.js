@@ -1,8 +1,47 @@
-// ── DOGSeer Offscreen Document — mic capture + audio playback ─────────────────
+// ── DOGSeer Offscreen — mic capture + queued audio playback ───────────────────
 let mediaRecorder = null;
-let micStream = null;
-const audioContext = new AudioContext({ sampleRate: 24000 });
+let micStream     = null;
 
+const audioContext  = new AudioContext({ sampleRate: 24000 });
+let audioQueue      = [];
+let isPlaying       = false;
+let nextPlayTime    = 0;
+
+// ── Queued audio playback — no overlapping chunks ─────────────────────────────
+function enqueueAudio(float32Array) {
+  const buffer = audioContext.createBuffer(1, float32Array.length, 24000);
+  buffer.copyToChannel(float32Array, 0);
+  audioQueue.push(buffer);
+  if (!isPlaying) playNext();
+}
+
+function playNext() {
+  if (audioQueue.length === 0) {
+    isPlaying    = false;
+    nextPlayTime = 0;
+    return;
+  }
+  isPlaying = true;
+
+  const buffer = audioQueue.shift();
+  const source = audioContext.createBufferSource();
+  source.buffer = buffer;
+  source.connect(audioContext.destination);
+
+  const startTime = Math.max(audioContext.currentTime, nextPlayTime);
+  source.start(startTime);
+  nextPlayTime = startTime + buffer.duration;
+
+  source.onended = playNext;
+}
+
+function clearAudioQueue() {
+  audioQueue   = [];
+  isPlaying    = false;
+  nextPlayTime = 0;
+}
+
+// ── Message listener ──────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.target !== "offscreen") return;
 
@@ -15,10 +54,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         noiseSuppression: true
       }
     }).then((stream) => {
-      micStream = stream;
-      mediaRecorder = new MediaRecorder(stream, {
-        mimeType: "audio/webm;codecs=opus"
-      });
+      micStream     = stream;
+      mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus" });
 
       mediaRecorder.ondataavailable = async (e) => {
         if (e.data.size === 0) return;
@@ -29,9 +66,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       mediaRecorder.start(250);
       sendResponse({ status: "started" });
-    }).catch((err) => {
-      sendResponse({ error: err.message });
-    });
+    }).catch((err) => sendResponse({ error: err.message }));
 
     return true;
   }
@@ -40,36 +75,31 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     mediaRecorder?.stop();
     micStream?.getTracks().forEach(t => t.stop());
     mediaRecorder = null;
-    micStream = null;
+    micStream     = null;
     sendResponse({ status: "stopped" });
   }
 
   if (msg.type === "PLAY_AUDIO") {
     try {
-      // msg.data is base64 PCM16 audio from Gemini at 24kHz
       const binary = atob(msg.data);
-      const bytes = new Uint8Array(binary.length);
+      const bytes  = new Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
 
-      // Convert PCM16 to Float32
-      const pcm16 = new Int16Array(bytes.buffer);
+      // PCM16 → Float32
+      const pcm16   = new Int16Array(bytes.buffer);
       const float32 = new Float32Array(pcm16.length);
-      for (let i = 0; i < pcm16.length; i++) {
-        float32[i] = pcm16[i] / 32768.0;
-      }
+      for (let i = 0; i < pcm16.length; i++) float32[i] = pcm16[i] / 32768.0;
 
-      const audioBuffer = audioContext.createBuffer(1, float32.length, 24000);
-      audioBuffer.copyToChannel(float32, 0);
-
-      const source = audioContext.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(audioContext.destination);
-      source.start();
-
-      sendResponse({ status: "playing" });
+      enqueueAudio(float32);
+      sendResponse({ status: "queued" });
     } catch (e) {
-      console.error("[DOGSeer] Error playing audio:", e);
-      sendResponse({ error: "Failed to play audio" });
+      console.error("[DOGSeer offscreen] Audio error:", e);
+      sendResponse({ error: e.message });
     }
+  }
+
+  if (msg.type === "CLEAR_AUDIO") {
+    clearAudioQueue();
+    sendResponse({ status: "cleared" });
   }
 });

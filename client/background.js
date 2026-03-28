@@ -250,3 +250,11 @@ chrome.commands.onCommand.addListener((command) => {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 connectWebSocket();
+
+// ── SPACE push-to-talk from content scripts ───────────────────────────────────
+// Content scripts send SPACE_DOWN / SPACE_UP since service workers
+// can't intercept keyboard events directly.
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.type === "SPACE_DOWN") startListening();
+  if (msg.type === "SPACE_UP")   stopListening();
+});

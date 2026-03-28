@@ -1,3 +1,34 @@
+// ── SPACE push-to-talk (prepended to whatsapp.js) ─────────────────────────────
+;(function() {
+  let spaceHeld = false;
+
+  document.addEventListener("keydown", (e) => {
+    if (e.code !== "Space") return;
+    const tag = document.activeElement?.tagName;
+    const isEditable = document.activeElement?.isContentEditable;
+    // Allow space in WhatsApp message compose box
+    if (tag === "INPUT" || tag === "TEXTAREA" || isEditable) return;
+
+    if (!spaceHeld) {
+      spaceHeld = true;
+      e.preventDefault();
+      e.stopPropagation();
+      chrome.runtime.sendMessage({ type: "SPACE_DOWN" });
+    }
+  }, true);
+
+  document.addEventListener("keyup", (e) => {
+    if (e.code !== "Space" || !spaceHeld) return;
+    const tag = document.activeElement?.tagName;
+    const isEditable = document.activeElement?.isContentEditable;
+    if (tag === "INPUT" || tag === "TEXTAREA" || isEditable) return;
+
+    spaceHeld = false;
+    e.preventDefault();
+    e.stopPropagation();
+    chrome.runtime.sendMessage({ type: "SPACE_UP" });
+  }, true);
+})();
 // ── DOGSeer WhatsApp content script ──────────────────────────────────────────
 // Injected into web.whatsapp.com — reads and acts on WhatsApp Web DOM
 

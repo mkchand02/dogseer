@@ -10,7 +10,8 @@
     "storage",
     "tabCapture",
     "tts",
-    "tabs"
+    "tabs",
+    "offscreen"
   ],
 
   "host_permissions": [
@@ -39,14 +40,5 @@
   "action": {
     "default_popup": "popup.html",
     "default_title": "DOGSeer"
-  },
-
-  "commands": {
-    "toggle-listen": {
-      "suggested_key": {
-        "default": "Ctrl+Shift+D"
-      },
-      "description": "Push to talk — press to speak to DOGSeer"
-    }
   }
 }

@@ -1,3 +1,34 @@
+// ── SPACE push-to-talk (prepended to gmail.js) ────────────────────────────────
+;(function() {
+  let spaceHeld = false;
+
+  document.addEventListener("keydown", (e) => {
+    if (e.code !== "Space") return;
+    const tag = document.activeElement?.tagName;
+    const isEditable = document.activeElement?.isContentEditable;
+    // Allow space in text inputs (compose box, search, etc.)
+    if (tag === "INPUT" || tag === "TEXTAREA" || isEditable) return;
+
+    if (!spaceHeld) {
+      spaceHeld = true;
+      e.preventDefault();
+      e.stopPropagation();
+      chrome.runtime.sendMessage({ type: "SPACE_DOWN" });
+    }
+  }, true); // capture phase = runs before Gmail's own handlers
+
+  document.addEventListener("keyup", (e) => {
+    if (e.code !== "Space" || !spaceHeld) return;
+    const tag = document.activeElement?.tagName;
+    const isEditable = document.activeElement?.isContentEditable;
+    if (tag === "INPUT" || tag === "TEXTAREA" || isEditable) return;
+
+    spaceHeld = false;
+    e.preventDefault();
+    e.stopPropagation();
+    chrome.runtime.sendMessage({ type: "SPACE_UP" });
+  }, true);
+})();
 // ── DOGSeer Gmail content script ─────────────────────────────────────────────
 // Injected into mail.google.com — reads and acts on Gmail DOM
 

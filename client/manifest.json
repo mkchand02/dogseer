@@ -28,11 +28,13 @@
     {
       "matches": ["https://mail.google.com/*"],
       "js": ["content_scripts/gmail.js"],
+      "css": ["content_scripts/statusbar.css"],
       "run_at": "document_idle"
     },
     {
       "matches": ["https://web.whatsapp.com/*"],
       "js": ["content_scripts/whatsapp.js"],
+      "css": ["content_scripts/statusbar.css"],
       "run_at": "document_idle"
     }
   ],

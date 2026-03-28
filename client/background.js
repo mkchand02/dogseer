@@ -163,10 +163,14 @@ function stopListening() {
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === "AUDIO_CHUNK") {
     if (ws?.readyState === WebSocket.OPEN) {
-      const binary = atob(msg.data);
-      const buf = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) buf[i] = binary.charCodeAt(i);
-      ws.send(buf.buffer);
+      try {
+        const binary = atob(msg.data);
+        const buf = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) buf[i] = binary.charCodeAt(i);
+        ws.send(buf.buffer);
+      } catch (e) {
+        console.error("[DOGSeer] Invalid base64 data received", e);
+      }
     }
   }
 
@@ -188,6 +192,9 @@ async function dispatchAction(msg) {
     ws?.send(JSON.stringify({ type: "action_result", data: { error: "Not on Gmail or WhatsApp Web" } }));
     return;
   }
+  // Notify content script of the action being performed
+  broadcastAction(tab.id, msg.tool, msg.data);
+
 
   const actionPromise = new Promise((resolve) => {
     const timeout = setTimeout(() => resolve({ error: "Action timed out" }), 8000);
@@ -207,12 +214,19 @@ async function dispatchAction(msg) {
 
   const result = await actionPromise;
   ws?.send(JSON.stringify({ type: "action_result", data: result }));
+  broadcastAction(tab.id, "action_result", result); // Notify content script of result
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function broadcastStatus(value) {
   chrome.runtime.sendMessage({ type: "STATUS_UPDATE", value }).catch(() => {});
 }
+
+// Broadcast to a specific tab's content script
+function broadcastAction(tabId, tool, data) {
+  chrome.tabs.sendMessage(tabId, { type: "ACTION_STATUS", tool, data }).catch(() => {});
+}
+
 
 function waitForWS(timeout = 5000) {
   return new Promise((resolve, reject) => {

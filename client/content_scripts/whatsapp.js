@@ -1,3 +1,50 @@
+// ── DOGSeer Status Bar UI ────────────────────────────────────────────────────
+const statusBar = {
+  element: null,
+  textElement: null,
+  subtextElement: null,
+  timeout: null,
+
+  create() {
+    this.element = document.createElement("div");
+    this.element.id = "dogseer-status-bar";
+    this.element.className = "hidden"; // Start hidden
+    this.element.innerHTML = `
+      <div id="dogseer-status-main">
+        <span id="dogseer-status-logo">🐕</span>
+        <span id="dogseer-status-text"></span>
+      </div>
+      <span id="dogseer-status-subtext"></span>
+    `;
+    document.body.appendChild(this.element);
+    this.textElement = document.getElementById("dogseer-status-text");
+    this.subtextElement = document.getElementById("dogseer-status-subtext");
+  },
+
+  show() {
+    this.element.classList.remove("hidden");
+  },
+
+  hide() {
+    this.element.classList.add("hidden");
+  },
+
+  update(text, subtext = "", duration = 4000) {
+    if (!this.element) this.create();
+    this.textElement.textContent = text;
+    this.subtextElement.textContent = subtext;
+    this.show();
+
+    clearTimeout(this.timeout);
+    if (duration > 0) {
+      this.timeout = setTimeout(() => this.hide(), duration);
+    }
+  },
+};
+
+// Initialize the status bar as soon as the script loads
+statusBar.create();
+
 // ── SPACE push-to-talk (prepended to whatsapp.js) ─────────────────────────────
 ;(function() {
   let spaceHeld = false;
@@ -218,28 +265,46 @@ async function confirmSend() {
 
 // ── Main message listener ─────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.type !== "EXECUTE_ACTION") return;
+  // Listener for actions to EXECUTE
+  if (msg.type === "EXECUTE_ACTION") {
+    console.log("[DOGSeer WhatsApp] Action:", msg.tool, msg.data);
 
-  console.log("[DOGSeer WhatsApp] Action:", msg.tool, msg.data);
-
-  const handle = async () => {
-    switch (msg.tool) {
-      case "whatsapp_action": {
-        const { action, params = {} } = msg.data;
-        switch (action) {
-          case "read_chats":    return readChats(params.count || 5);
-          case "read_messages": return readMessages(params.count || 10);
-          case "open_chat":     return await openChat(params.contact);
-          case "send_message":  return await sendMessage(params);
-          case "confirm_send":  return await confirmSend();
-          default:              return { error: `Unknown WhatsApp action: ${action}` };
+    const handle = async () => {
+      switch (msg.tool) {
+        case "whatsapp_action": {
+          const { action, params = {} } = msg.data;
+          switch (action) {
+            case "read_chats":    return readChats(params.count || 5);
+            case "read_messages": return readMessages(params.count || 10);
+            case "open_chat":     return await openChat(params.contact);
+            case "send_message":  return await sendMessage(params);
+            case "confirm_send":  return await confirmSend();
+            default:              return { error: `Unknown WhatsApp action: ${action}` };
+          }
         }
+        default:
+          return { error: `whatsapp.js received unknown tool: ${msg.tool}` };
       }
-      default:
-        return { error: `whatsapp.js received unknown tool: ${msg.tool}` };
-    }
-  };
+    };
 
-  handle().then(sendResponse);
-  return true;
+    handle().then(sendResponse);
+    return true;
+  }
+
+  // Listener for STATUS updates
+  if (msg.type === "ACTION_STATUS") {
+    const { tool, data } = msg;
+    let subtext = "";
+    if (data.params) {
+      subtext = Object.entries(data.params)
+        .map(([key, value]) => `${key}: ${value}`)
+        .join(", ");
+    } else if (data.error) {
+      subtext = `Error: ${data.error}`;
+    } else if (data.status) {
+      subtext = `Status: ${data.status}`;
+    }
+
+    statusBar.update(`Performing action: ${data.action || tool}`, subtext);
+  }
 });

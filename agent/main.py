@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL   = "gemini-2.5-flash-preview-native-audio-dialog"
+GEMINI_MODEL   = "gemini-3.1-flash-live-preview"
 
 if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY not found — check your .env file")
@@ -105,28 +105,20 @@ async def receive_from_extension(ws: WebSocket, session):
             if msg_type == "frame":
                 # Screen frame → send as inline image to Gemini
                 image_bytes = base64.b64decode(msg["data"])
-                await session.send(
-                    input=types.LiveClientRealtimeInput(
-                        media_chunks=[
-                            types.Blob(
-                                mime_type="image/jpeg",
-                                data=image_bytes
-                            )
-                        ]
-                    )
+                await session.send_realtime_input(
+                    video=types.Blob(data=image_bytes, mime_type="image/jpeg")
                 )
 
             elif msg_type == "end_turn":
                 # User released SPACE — signal Gemini to respond
-                await session.send(input=".", end_of_turn=True)
+                await session.send_realtime_input(text=".")
                 logger.info("End of turn sent to Gemini")
 
             elif msg_type == "action_result":
                 # DOM action completed — send result back to Gemini so it can narrate
                 result_text = json.dumps(msg.get("data", {}))
-                await session.send(
-                    input=f"Action completed. Here is the result: {result_text}",
-                    end_of_turn=True
+                await session.send_realtime_input(
+                    text=f"Action completed. Here is the result: {result_text}"
                 )
 
         except json.JSONDecodeError:
@@ -134,15 +126,8 @@ async def receive_from_extension(ws: WebSocket, session):
             pass
 
     async for raw in ws.iter_bytes():
-        await session.send(
-            input=types.LiveClientRealtimeInput(
-                media_chunks=[
-                    types.Blob(
-                        mime_type="audio/pcm",
-                        data=raw
-                    )
-                ]
-            )
+        await session.send_realtime_input(
+            audio=types.Blob(data=raw, mime_type="audio/pcm;rate=16000")
         )
 
 
@@ -156,15 +141,20 @@ async def send_to_extension(ws: WebSocket, session):
       - Text            → check if it contains an action JSON block
       - Tool call       → package as action message for DOM injection
     """
-    async for response in session:
+    async for response in session.receive():
 
         # ── Audio response ────────────────────────────────────────────────
-        if response.data:
+        content = response.server_content
+        if not content: continue
+        for part in (content.model_turn.parts if content.model_turn else []):
+            if part.inline_data:
+                await ws.send_bytes(part.inline_data.data)
+        if False:  # placeholder
             await ws.send_bytes(response.data)
 
         # ── Text response ─────────────────────────────────────────────────
-        if response.text:
-            text = response.text
+        if content.output_transcription and content.output_transcription.text:
+            text = content.output_transcription.text
             logger.info(f"Gemini text: {text[:80]}...")
 
             # Check if Gemini embedded an action JSON in its text response
@@ -182,8 +172,8 @@ async def send_to_extension(ws: WebSocket, session):
                 })
 
         # ── Tool call response ────────────────────────────────────────────
-        if response.tool_call:
-            for fn in response.tool_call.function_calls:
+        if content.tool_call:
+            for fn in content.tool_call.function_calls:
                 logger.info(f"Tool call: {fn.name} params={fn.args}")
                 await ws.send_json({
                     "type":   "action",

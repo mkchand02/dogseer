@@ -5,7 +5,7 @@ let ws           = null;
 let isListening  = false;
 let isConnecting = false;
 
-// ── WebSocket management ──────────────────────────────────────────────────────
+// ── WebSocket ─────────────────────────────────────────────────────────────────
 function connectWebSocket() {
   if (isConnecting) return;
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
@@ -23,17 +23,20 @@ function connectWebSocket() {
   ws.onmessage = async (event) => {
     if (event.data instanceof ArrayBuffer) {
       if (event.data.byteLength < 10) return;
+      console.log("[DOGSeer] Audio from agent, bytes:", event.data.byteLength);
       const b64 = btoa(String.fromCharCode(...new Uint8Array(event.data)));
-      chrome.runtime.sendMessage({ target: "offscreen", type: "PLAY_AUDIO", data: b64 }).catch(() => {});
+      chrome.runtime.sendMessage({ target: "offscreen", type: "PLAY_AUDIO", data: b64 })
+        .catch(e => console.error("[DOGSeer] PLAY_AUDIO error:", e));
       return;
     }
     try {
       const msg = JSON.parse(event.data);
-      console.log("[DOGSeer] msg:", msg.type);
+      console.log("[DOGSeer] msg:", msg.type, msg.value || "");
       switch (msg.type) {
         case "status":     broadcastStatus(msg.value); break;
         case "action":     dispatchAction(msg); break;
         case "transcript":
+          console.log("[DOGSeer] Speaking:", msg.value);
           chrome.tts.speak(msg.value, { rate: 0.95, pitch: 1.0, volume: 1.0 });
           broadcastStatus("speaking");
           break;
@@ -50,29 +53,30 @@ function connectWebSocket() {
     }
   };
 
-  ws.onerror = () => {
-    isConnecting = false;
-    broadcastStatus("error");
-  };
-
+  ws.onerror = (e) => { isConnecting = false; console.error("[DOGSeer] WS error"); broadcastStatus("error"); };
   ws.onclose = () => {
-    isConnecting = false;
-    ws = null;
+    isConnecting = false; ws = null;
     console.log("[DOGSeer] WS closed — reconnecting in 5s");
     broadcastStatus("ready");
     setTimeout(connectWebSocket, 5000);
   };
 }
 
-// ── Offscreen helper ──────────────────────────────────────────────────────────
+// ── Offscreen ─────────────────────────────────────────────────────────────────
 async function ensureOffscreen() {
-  const existing = await chrome.offscreen.hasDocument();
-  if (!existing) {
-    await chrome.offscreen.createDocument({
-      url: "offscreen.html",
-      reasons: ["USER_MEDIA"],
-      justification: "Mic capture and audio playback"
-    });
+  try {
+    const existing = await chrome.offscreen.hasDocument();
+    if (!existing) {
+      await chrome.offscreen.createDocument({
+        url: "offscreen.html",
+        reasons: ["USER_MEDIA"],
+        justification: "Mic capture and audio playback"
+      });
+      // Wait for offscreen to initialize
+      await new Promise(r => setTimeout(r, 300));
+    }
+  } catch (e) {
+    console.error("[DOGSeer] ensureOffscreen error:", e);
   }
 }
 
@@ -81,7 +85,7 @@ async function startListening() {
   if (isListening) return;
   isListening = true;
   broadcastStatus("listening");
-  console.log("[DOGSeer] startListening — ws state:", ws?.readyState);
+  console.log("[DOGSeer] startListening — ws:", ws?.readyState);
 
   try {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -89,8 +93,16 @@ async function startListening() {
       await waitForWS();
     }
 
-    await ensureOffscreen().catch(e => console.error("[DOGSeer] offscreen error:", e));
-    chrome.runtime.sendMessage({ target: "offscreen", type: "START_MIC" }, r => console.log("[DOGSeer] START_MIC response:", r, chrome.runtime.lastError?.message));
+    await ensureOffscreen();
+
+    // Send START_MIC and wait for confirmation
+    const response = await new Promise((resolve) => {
+      chrome.runtime.sendMessage(
+        { target: "offscreen", type: "START_MIC" },
+        (r) => resolve(r)
+      );
+    });
+    console.log("[DOGSeer] Mic started:", response);
 
   } catch (err) {
     console.error("[DOGSeer] startListening error:", err);
@@ -109,24 +121,32 @@ function stopListening() {
 
   if (ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "end_turn" }));
+    console.log("[DOGSeer] end_turn sent");
   }
 
   broadcastStatus("thinking");
 }
 
-// ── Audio chunks offscreen → WS ───────────────────────────────────────────────
-chrome.runtime.onMessage.addListener((msg) => {
+// ── Message listener ──────────────────────────────────────────────────────────
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+
+  // ✅ Audio chunks from offscreen → forward to WS
   if (msg.type === "AUDIO_CHUNK") {
+    console.log("[DOGSeer] Audio chunk received, size:", msg.data?.length);
     if (ws?.readyState === WebSocket.OPEN) {
       try {
         const binary = atob(msg.data);
         const buf = new Uint8Array(binary.length);
         for (let i = 0; i < binary.length; i++) buf[i] = binary.charCodeAt(i);
         ws.send(buf.buffer);
+        console.log("[DOGSeer] Audio chunk sent to WS, bytes:", buf.length);
       } catch (e) {
         console.error("[DOGSeer] Audio send error:", e);
       }
+    } else {
+      console.warn("[DOGSeer] WS not open, dropping audio chunk. State:", ws?.readyState);
     }
+    return;
   }
 
   if (msg.type === "START_LISTENING") startListening();
@@ -162,6 +182,7 @@ async function dispatchAction(msg) {
     });
   });
 
+  console.log("[DOGSeer] Action result:", result);
   ws?.send(JSON.stringify({ type: "action_result", data: result }));
 }
 
@@ -182,13 +203,8 @@ function waitForWS(timeout = 5000) {
 }
 
 // ── Auto-open Gmail ───────────────────────────────────────────────────────────
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.tabs.create({ url: "https://mail.google.com" });
-});
-chrome.runtime.onStartup.addListener(() => {
-  chrome.tabs.create({ url: "https://mail.google.com" });
-});
+chrome.runtime.onInstalled.addListener(() => chrome.tabs.create({ url: "https://mail.google.com" }));
+chrome.runtime.onStartup.addListener(() => chrome.tabs.create({ url: "https://mail.google.com" }));
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 connectWebSocket();
-// debug patch - remove later

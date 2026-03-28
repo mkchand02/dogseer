@@ -45,26 +45,31 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "PLAY_AUDIO") {
-    // msg.data is base64 PCM16 audio from Gemini at 24kHz
-    const binary = atob(msg.data);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    try {
+      // msg.data is base64 PCM16 audio from Gemini at 24kHz
+      const binary = atob(msg.data);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
 
-    // Convert PCM16 to Float32
-    const pcm16 = new Int16Array(bytes.buffer);
-    const float32 = new Float32Array(pcm16.length);
-    for (let i = 0; i < pcm16.length; i++) {
-      float32[i] = pcm16[i] / 32768.0;
+      // Convert PCM16 to Float32
+      const pcm16 = new Int16Array(bytes.buffer);
+      const float32 = new Float32Array(pcm16.length);
+      for (let i = 0; i < pcm16.length; i++) {
+        float32[i] = pcm16[i] / 32768.0;
+      }
+
+      const audioBuffer = audioContext.createBuffer(1, float32.length, 24000);
+      audioBuffer.copyToChannel(float32, 0);
+
+      const source = audioContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(audioContext.destination);
+      source.start();
+
+      sendResponse({ status: "playing" });
+    } catch (e) {
+      console.error("[DOGSeer] Error playing audio:", e);
+      sendResponse({ error: "Failed to play audio" });
     }
-
-    const audioBuffer = audioContext.createBuffer(1, float32.length, 24000);
-    audioBuffer.copyToChannel(float32, 0);
-
-    const source = audioContext.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(audioContext.destination);
-    source.start();
-
-    sendResponse({ status: "playing" });
   }
 });

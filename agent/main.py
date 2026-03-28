@@ -18,14 +18,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL   = "gemini-3.1-flash-live-preview"
+# ✅ Correct model per official docs — 2.0 is deprecated
+GEMINI_MODEL = "gemini-3.1-flash-live-preview"
 
 if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY not found")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-app = FastAPI(title="DOGSeer Agent", version="0.1.0")
+app = FastAPI(title="DOGSeer Agent", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -33,9 +34,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.get("/health")
 async def health():
-    return {"status": "ok", "agent": "DOGSeer"}
+    return {"status": "ok", "agent": "DOGSeer", "model": GEMINI_MODEL}
 
 
 @app.websocket("/live")
@@ -45,17 +47,21 @@ async def live_endpoint(ws: WebSocket):
     await ws.send_json({"type": "status", "value": "connected"})
 
     try:
-        # Minimal config — no tools, no voice config, just get it connecting
         config = types.LiveConnectConfig(
             response_modalities=["AUDIO"],
-            system_instruction=SYSTEM_PROMPT,
+            system_instruction=types.Content(
+                parts=[types.Part(text=SYSTEM_PROMPT)]
+            ),
+            # ✅ Enable transcriptions for both input and output
+            input_audio_transcription=types.AudioTranscriptionConfig(),
+            output_audio_transcription=types.AudioTranscriptionConfig(),
         )
 
         async with client.aio.live.connect(
             model=GEMINI_MODEL,
             config=config
         ) as session:
-            logger.info("Gemini Live session open")
+            logger.info(f"Gemini Live session open: {GEMINI_MODEL}")
             await asyncio.gather(
                 receive_from_extension(ws, session),
                 send_to_extension(ws, session)
@@ -72,66 +78,103 @@ async def live_endpoint(ws: WebSocket):
 
 
 async def receive_from_extension(ws: WebSocket, session):
-    async for message in ws.iter_text():
-        try:
-            msg = json.loads(message)
-            msg_type = msg.get("type")
+    """Handle ALL incoming messages — text (JSON) and binary (audio)"""
+    try:
+        while True:
+            message = await ws.receive()
 
-            if msg_type == "frame":
-                image_bytes = base64.b64decode(msg["data"])
+            if message.get("type") == "websocket.disconnect":
+                break
+
+            if "bytes" in message and message["bytes"]:
+                # Raw binary = mic audio (webm/opus chunks from MediaRecorder)
+                raw = message["bytes"]
                 await session.send_realtime_input(
-                    video=types.Blob(data=image_bytes, mime_type="image/jpeg")
+                    audio=types.Blob(data=raw, mime_type="audio/webm;codecs=opus")
                 )
 
-            elif msg_type == "end_turn":
-                await session.send_realtime_input(text=".")
-                logger.info("End of turn sent")
+            elif "text" in message and message["text"]:
+                try:
+                    msg = json.loads(message["text"])
+                    msg_type = msg.get("type")
 
-            elif msg_type == "action_result":
-                result_text = json.dumps(msg.get("data", {}))
-                await session.send_realtime_input(
-                    text=f"Action result: {result_text}"
-                )
+                    if msg_type == "frame":
+                        # ✅ Screen frame — send as video alongside audio (multimodal)
+                        image_bytes = base64.b64decode(msg["data"])
+                        await session.send_realtime_input(
+                            video=types.Blob(data=image_bytes, mime_type="image/jpeg")
+                        )
+                        logger.debug("Video frame sent to Gemini")
 
-        except json.JSONDecodeError:
-            pass
+                    elif msg_type == "end_turn":
+                        # ✅ Correct: send audioStreamEnd to flush cached audio
+                        await session.send_realtime_input(
+                            audio_stream_end=True
+                        )
+                        logger.info("Audio stream ended (end of turn)")
 
-    async for raw in ws.iter_bytes():
-        await session.send_realtime_input(
-            audio=types.Blob(data=raw, mime_type="audio/pcm;rate=16000")
-        )
+                    elif msg_type == "action_result":
+                        result_text = json.dumps(msg.get("data", {}))
+                        await session.send_realtime_input(
+                            text=f"Action result: {result_text}"
+                        )
+                        logger.info(f"Action result: {result_text[:80]}")
+
+                except json.JSONDecodeError:
+                    pass
+
+    except Exception as e:
+        logger.error(f"receive_from_extension error: {e}")
 
 
 async def send_to_extension(ws: WebSocket, session):
-    async for response in session.receive():
-        content = response.server_content
+    """Stream Gemini responses — process ALL parts per event"""
+    try:
+        async for response in session.receive():
+            content = response.server_content
 
-        if not content:
-            if response.tool_call:
-                for fn in response.tool_call.function_calls:
-                    logger.info(f"Tool call: {fn.name} {fn.args}")
-                    await ws.send_json({
-                        "type":    "action",
-                        "tool":    fn.name,
-                        "data":    dict(fn.args),
-                        "call_id": fn.id
-                    })
-            continue
+            if not content:
+                # Tool calls
+                if response.tool_call:
+                    for fn in response.tool_call.function_calls:
+                        logger.info(f"Tool call: {fn.name} {fn.args}")
+                        await ws.send_json({
+                            "type":    "action",
+                            "tool":    fn.name,
+                            "data":    dict(fn.args),
+                            "call_id": fn.id
+                        })
+                continue
 
-        if content.model_turn:
-            for part in content.model_turn.parts:
-                if part.inline_data:
-                    await ws.send_bytes(part.inline_data.data)
+            # ✅ Process ALL parts in each event (audio + transcript can arrive together)
+            if content.model_turn:
+                for part in content.model_turn.parts:
+                    if part.inline_data:
+                        # PCM16 audio at 24kHz — send as binary
+                        await ws.send_bytes(part.inline_data.data)
 
-        if content.output_transcription:
-            text = content.output_transcription.text
-            if text:
-                logger.info(f"Transcript: {text[:80]}")
-                action = parse_action_from_text(text)
-                if action:
-                    await ws.send_json({"type": "action", "data": action})
-                else:
-                    await ws.send_json({"type": "transcript", "value": text})
+            # ✅ Input transcription (what user said)
+            if content.input_transcription:
+                text = content.input_transcription.text
+                if text and text.strip():
+                    logger.info(f"User said: {text[:80]}")
+                    await ws.send_json({"type": "user_transcript", "value": text})
 
-        if content.interrupted:
-            await ws.send_json({"type": "status", "value": "interrupted"})
+            # ✅ Output transcription (what Gemini said)
+            if content.output_transcription:
+                text = content.output_transcription.text
+                if text and text.strip():
+                    logger.info(f"Gemini: {text[:80]}")
+                    action = parse_action_from_text(text)
+                    if action:
+                        await ws.send_json({"type": "action", "data": action})
+                    else:
+                        await ws.send_json({"type": "transcript", "value": text})
+
+            # ✅ Interruption — tell client to stop playback
+            if content.interrupted is True:
+                await ws.send_json({"type": "status", "value": "interrupted"})
+                logger.info("Gemini interrupted")
+
+    except Exception as e:
+        logger.error(f"send_to_extension error: {e}")

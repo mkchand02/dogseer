@@ -44,9 +44,9 @@
   "commands": {
     "toggle-listen": {
       "suggested_key": {
-        "default": "Space"
+        "default": "Ctrl+Shift+D"
       },
-      "description": "Push to talk — hold to speak to DOGSeer"
+      "description": "Push to talk — press to speak to DOGSeer"
     }
   }
 }

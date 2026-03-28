@@ -17,7 +17,7 @@ TOOL_DECLARATIONS = [
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["read_inbox", "read_email", "compose_email", "reply_email"],
+                    "enum": ["read_inbox", "read_email", "compose_email", "reply_email", "send_email"],
                     "description": "The Gmail action to perform"
                 },
                 "params": {
@@ -42,7 +42,7 @@ TOOL_DECLARATIONS = [
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["read_chats", "read_messages", "send_message"],
+                    "enum": ["read_chats", "read_messages", "send_message", "open_chat", "confirm_send"],
                     "description": "The WhatsApp action to perform"
                 },
                 "params": {

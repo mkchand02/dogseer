@@ -7,13 +7,12 @@ import os
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-import google.genai as genai
+from google import genai
 from google.genai import types
 
 from system_prompt import SYSTEM_PROMPT
 from tools import TOOL_DECLARATIONS, parse_action_from_text
 
-# ── env & logging ────────────────────────────────────────────────────────────
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -22,14 +21,14 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL   = "gemini-3.1-flash-live-preview"
 
 if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY not found — check your .env file")
+    raise RuntimeError("GEMINI_API_KEY not found")
 
-# ── FastAPI app ───────────────────────────────────────────────────────────────
+client = genai.Client(api_key=GEMINI_API_KEY)
+
 app = FastAPI(title="DOGSeer Agent", version="0.1.0")
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # tighten this post-hackathon
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -38,41 +37,25 @@ app.add_middleware(
 async def health():
     return {"status": "ok", "agent": "DOGSeer"}
 
-# ── Gemini client ─────────────────────────────────────────────────────────────
-client = genai.Client(api_key=GEMINI_API_KEY)
 
-# ── WebSocket endpoint ────────────────────────────────────────────────────────
 @app.websocket("/live")
 async def live_endpoint(ws: WebSocket):
     await ws.accept()
     logger.info("Extension connected")
-
-    # Send status to extension UI
     await ws.send_json({"type": "status", "value": "connected"})
 
     try:
-        # ── Build Gemini Live config ──────────────────────────────────────
+        # Minimal config — no tools, no voice config, just get it connecting
         config = types.LiveConnectConfig(
-            response_modalities=["AUDIO", "TEXT"],
+            response_modalities=["AUDIO"],
             system_instruction=SYSTEM_PROMPT,
-            tools=[{"function_declarations": TOOL_DECLARATIONS}],
-            speech_config=types.SpeechConfig(
-                voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name="Aoede"   # warm, calm female voice
-                    )
-                )
-            )
         )
 
-        # ── Open Gemini Live session ──────────────────────────────────────
         async with client.aio.live.connect(
             model=GEMINI_MODEL,
             config=config
         ) as session:
             logger.info("Gemini Live session open")
-
-            # Run send and receive concurrently
             await asyncio.gather(
                 receive_from_extension(ws, session),
                 send_to_extension(ws, session)
@@ -81,48 +64,36 @@ async def live_endpoint(ws: WebSocket):
     except WebSocketDisconnect:
         logger.info("Extension disconnected")
     except Exception as e:
-        logger.error(f"Session error: {e}")
-        await ws.send_json({"type": "error", "value": str(e)})
+        logger.error(f"Session error: {e}", exc_info=True)
+        try:
+            await ws.send_json({"type": "error", "value": str(e)})
+        except Exception:
+            pass
 
 
-# ── Receive from extension → forward to Gemini ───────────────────────────────
 async def receive_from_extension(ws: WebSocket, session):
-    """
-    Reads messages from the Chrome extension and forwards them to Gemini Live.
-    
-    Message formats from extension:
-      Binary frames  → raw PCM16 audio bytes
-      JSON text:
-        {"type": "frame",    "data": "<base64 JPEG>"}   screen frame
-        {"type": "end_turn"}                             user released SPACE
-        {"type": "action_result", "data": {...}}         DOM action result
-    """
     async for message in ws.iter_text():
         try:
             msg = json.loads(message)
             msg_type = msg.get("type")
 
             if msg_type == "frame":
-                # Screen frame → send as inline image to Gemini
                 image_bytes = base64.b64decode(msg["data"])
                 await session.send_realtime_input(
                     video=types.Blob(data=image_bytes, mime_type="image/jpeg")
                 )
 
             elif msg_type == "end_turn":
-                # User released SPACE — signal Gemini to respond
                 await session.send_realtime_input(text=".")
-                logger.info("End of turn sent to Gemini")
+                logger.info("End of turn sent")
 
             elif msg_type == "action_result":
-                # DOM action completed — send result back to Gemini so it can narrate
                 result_text = json.dumps(msg.get("data", {}))
                 await session.send_realtime_input(
-                    text=f"Action completed. Here is the result: {result_text}"
+                    text=f"Action result: {result_text}"
                 )
 
         except json.JSONDecodeError:
-            # Binary audio frame — send as PCM16 audio
             pass
 
     async for raw in ws.iter_bytes():
@@ -131,59 +102,36 @@ async def receive_from_extension(ws: WebSocket, session):
         )
 
 
-# ── Receive from Gemini → forward to extension ───────────────────────────────
 async def send_to_extension(ws: WebSocket, session):
-    """
-    Reads responses from Gemini Live and forwards them to the extension.
-
-    Gemini can respond with:
-      - Audio bytes     → stream back as binary for immediate playback
-      - Text            → check if it contains an action JSON block
-      - Tool call       → package as action message for DOM injection
-    """
     async for response in session.receive():
-
-        # ── Audio response ────────────────────────────────────────────────
         content = response.server_content
-        if not content: continue
-        for part in (content.model_turn.parts if content.model_turn else []):
-            if part.inline_data:
-                await ws.send_bytes(part.inline_data.data)
-        if False:  # placeholder
-            await ws.send_bytes(response.data)
 
-        # ── Text response ─────────────────────────────────────────────────
-        if content.output_transcription and content.output_transcription.text:
+        if not content:
+            if response.tool_call:
+                for fn in response.tool_call.function_calls:
+                    logger.info(f"Tool call: {fn.name} {fn.args}")
+                    await ws.send_json({
+                        "type":    "action",
+                        "tool":    fn.name,
+                        "data":    dict(fn.args),
+                        "call_id": fn.id
+                    })
+            continue
+
+        if content.model_turn:
+            for part in content.model_turn.parts:
+                if part.inline_data:
+                    await ws.send_bytes(part.inline_data.data)
+
+        if content.output_transcription:
             text = content.output_transcription.text
-            logger.info(f"Gemini text: {text[:80]}...")
+            if text:
+                logger.info(f"Transcript: {text[:80]}")
+                action = parse_action_from_text(text)
+                if action:
+                    await ws.send_json({"type": "action", "data": action})
+                else:
+                    await ws.send_json({"type": "transcript", "value": text})
 
-            # Check if Gemini embedded an action JSON in its text response
-            action = parse_action_from_text(text)
-            if action:
-                await ws.send_json({
-                    "type": "action",
-                    "data": action
-                })
-            else:
-                # Plain narration — send for TTS fallback display
-                await ws.send_json({
-                    "type": "transcript",
-                    "value": text
-                })
-
-        # ── Tool call response ────────────────────────────────────────────
-        if content.tool_call:
-            for fn in content.tool_call.function_calls:
-                logger.info(f"Tool call: {fn.name} params={fn.args}")
-                await ws.send_json({
-                    "type":   "action",
-                    "tool":   fn.name,
-                    "data":   dict(fn.args),
-                    "call_id": fn.id
-                })
-                # Status update so UI shows "thinking"
-                await ws.send_json({
-                    "type":  "status",
-                    "value": "waiting_for_action"
-                })
-
+        if content.interrupted:
+            await ws.send_json({"type": "status", "value": "interrupted"})

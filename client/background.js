@@ -81,7 +81,7 @@ async function startListening() {
   if (isListening) return;
   isListening = true;
   broadcastStatus("listening");
-  console.log("[DOGSeer] startListening");
+  console.log("[DOGSeer] startListening — ws state:", ws?.readyState);
 
   try {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -89,8 +89,8 @@ async function startListening() {
       await waitForWS();
     }
 
-    await ensureOffscreen();
-    chrome.runtime.sendMessage({ target: "offscreen", type: "START_MIC" });
+    await ensureOffscreen().catch(e => console.error("[DOGSeer] offscreen error:", e));
+    chrome.runtime.sendMessage({ target: "offscreen", type: "START_MIC" }, r => console.log("[DOGSeer] START_MIC response:", r, chrome.runtime.lastError?.message));
 
   } catch (err) {
     console.error("[DOGSeer] startListening error:", err);
@@ -191,3 +191,4 @@ chrome.runtime.onStartup.addListener(() => {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 connectWebSocket();
+// debug patch - remove later

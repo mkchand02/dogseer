@@ -258,3 +258,12 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === "SPACE_DOWN") startListening();
   if (msg.type === "SPACE_UP")   stopListening();
 });
+
+// ── Auto-open Gmail on extension install/startup ──────────────────────────────
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.tabs.create({ url: "https://mail.google.com" });
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  chrome.tabs.create({ url: "https://mail.google.com" });
+});

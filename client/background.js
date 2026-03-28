@@ -1,6 +1,5 @@
 // ── DOGSeer background service worker ────────────────────────────────────────
-// const AGENT_WS_URL = "wss://dogseer-agent-587117712878.us-central1.run.app/live";
-const AGENT_WS_URL = "ws://localhost:8000/live"; // For local development
+const AGENT_WS_URL = "wss://dogseer-agent-587117712878.us-central1.run.app/live";
 
 let ws            = null;
 let frameInterval = null;

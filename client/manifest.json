@@ -1,0 +1,52 @@
+{
+  "manifest_version": 3,
+  "name": "DOGSeer",
+  "version": "0.1.0",
+  "description": "AI-powered accessibility assistant for Gmail and WhatsApp Web",
+
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "tabCapture",
+    "tts",
+    "tabs"
+  ],
+
+  "host_permissions": [
+    "https://mail.google.com/*",
+    "https://web.whatsapp.com/*"
+  ],
+
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["https://mail.google.com/*"],
+      "js": ["content_scripts/gmail.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://web.whatsapp.com/*"],
+      "js": ["content_scripts/whatsapp.js"],
+      "run_at": "document_idle"
+    }
+  ],
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "DOGSeer"
+  },
+
+  "commands": {
+    "toggle-listen": {
+      "suggested_key": {
+        "default": "Space"
+      },
+      "description": "Push to talk — hold to speak to DOGSeer"
+    }
+  }
+}

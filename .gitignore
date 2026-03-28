@@ -18,11 +18,11 @@ build/
 venv/
 env/
 
-# GCP credentials
-*.json
+# GCP credentials — these specific json patterns only
 service-account*.json
 credentials*.json
 gcp-key*.json
+*-service-account.json
 
 # IDE
 .vscode/

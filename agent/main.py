@@ -24,7 +24,9 @@ GEMINI_MODEL = "gemini-3.1-flash-live-preview"
 if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY not found")
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel(GEMINI_MODEL, tools=TOOL_DECLARATIONS)
+
 
 app = FastAPI(title="DOGSeer Agent", version="0.2.0")
 app.add_middleware(
@@ -57,8 +59,7 @@ async def live_endpoint(ws: WebSocket):
             output_audio_transcription=types.AudioTranscriptionConfig(),
         )
 
-        async with client.aio.live.connect(
-            model=GEMINI_MODEL,
+        async with model.aio.live.connect(
             config=config
         ) as session:
             logger.info(f"Gemini Live session open: {GEMINI_MODEL}")

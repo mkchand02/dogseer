@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>DOGSeer</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      width: 300px;
+      min-height: 200px;
+      background: #0f0f0f;
+      color: #ffffff;
+      font-family: system-ui, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      gap: 16px;
+    }
+
+    h1 {
+      font-size: 22px;
+      font-weight: 600;
+      letter-spacing: 2px;
+      color: #ffffff;
+    }
+
+    .tagline {
+      font-size: 12px;
+      color: #888;
+      text-align: center;
+    }
+
+    #status-ring {
+      width: 80px;
+      height: 80px;
+      border-radius: 50%;
+      background: #1a1a1a;
+      border: 3px solid #333;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 32px;
+      transition: all 0.3s ease;
+    }
+
+    #status-ring.listening {
+      border-color: #ef4444;
+      box-shadow: 0 0 20px rgba(239,68,68,0.4);
+      animation: pulse 1s infinite;
+    }
+
+    #status-ring.thinking {
+      border-color: #f59e0b;
+      box-shadow: 0 0 20px rgba(245,158,11,0.4);
+    }
+
+    #status-ring.speaking {
+      border-color: #22c55e;
+      box-shadow: 0 0 20px rgba(34,197,94,0.4);
+    }
+
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.05); }
+    }
+
+    #status-text {
+      font-size: 13px;
+      color: #aaa;
+      text-align: center;
+      min-height: 20px;
+    }
+
+    #talk-btn {
+      width: 100%;
+      padding: 14px;
+      background: #1a1a1a;
+      border: 2px solid #333;
+      border-radius: 12px;
+      color: #fff;
+      font-size: 15px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+      user-select: none;
+    }
+
+    #talk-btn:active, #talk-btn.active {
+      background: #ef4444;
+      border-color: #ef4444;
+    }
+
+    .hint {
+      font-size: 11px;
+      color: #555;
+      text-align: center;
+    }
+
+    /* High contrast support */
+    @media (prefers-contrast: high) {
+      body { background: #000; }
+      #talk-btn { border-color: #fff; }
+    }
+  </style>
+</head>
+<body>
+  <h1>🐕 DOGSeer</h1>
+  <p class="tagline">Your eyes on the web</p>
+
+  <div id="status-ring" role="status" aria-live="polite">🎙️</div>
+
+  <p id="status-text">Ready — hold SPACE or button below</p>
+
+  <!-- ARIA live region for screen readers -->
+  <div id="sr-announce" aria-live="assertive" aria-atomic="true"
+       style="position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden">
+  </div>
+
+  <button id="talk-btn"
+          aria-label="Hold to talk to DOGSeer"
+          role="button">
+    🎤 Hold to Talk
+  </button>
+
+  <p class="hint">Works on Gmail &amp; WhatsApp Web</p>
+
+  <script src="popup.js"></script>
+</body>
+</html>
